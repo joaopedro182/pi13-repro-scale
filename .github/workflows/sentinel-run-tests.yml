@@ -1,0 +1,84 @@
+name: Sentinel Run Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_command:
+        description: "Command to run the tests"
+        required: false
+        default: "npx playwright test"
+      generated_paths:
+        description: "JSON array of spec file paths to scope the run to (empty = all)"
+        required: false
+        default: "[]"
+      base_url:
+        description: "BASE_URL env var for the app under test"
+        required: false
+        default: ""
+      correlation_id:
+        description: "Opaque id echoed back so the caller can correlate this run — no functional use"
+        required: false
+        default: ""
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Correlation id
+        run: echo "correlation_id=${{ github.event.inputs.correlation_id }}"
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Detect package manager and install dependencies
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            corepack enable
+            corepack prepare pnpm@latest --activate
+            pnpm install --no-frozen-lockfile
+          elif [ -f yarn.lock ]; then
+            corepack enable
+            yarn install --no-frozen-lockfile
+          elif [ -f package-lock.json ]; then
+            npm ci --prefer-offline
+          else
+            npm install
+          fi
+
+      - name: Install Playwright browsers (if applicable)
+        run: |
+          if node -e "const p=require('./package.json'); process.exit((p.dependencies&&p.dependencies['@playwright/test'])||(p.devDependencies&&p.devDependencies['@playwright/test'])?0:1)" 2>/dev/null; then
+            npx playwright install --with-deps chromium
+          else
+            echo "Playwright not declared in package.json — skipping browser install"
+          fi
+
+      - name: Run tests
+        env:
+          BASE_URL: ${{ github.event.inputs.base_url }}
+          CI: "true"
+        run: |
+          paths=$(echo '${{ github.event.inputs.generated_paths }}' | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(0,'utf8')).join(' '))")
+          if [ -n "$paths" ]; then
+            ${{ github.event.inputs.test_command }} -- $paths
+          else
+            ${{ github.event.inputs.test_command }}
+          fi
+        continue-on-error: true
+        id: run_tests
+
+      - name: Upload test-results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Fail job if tests failed
+        if: steps.run_tests.outcome == 'failure'
+        run: exit 1
